@@ -50,10 +50,26 @@
   // versions: older quests expose `config.application`, newer ones ship an
   // `applications` array, and some carry only a bare id. Normalise all of them.
   const resolveApp = config => {
+    const fallbackName = config.messages?.gameTitle ?? config.messages?.questName ?? "Unknown";
     const app = config.application ?? config.applications?.[0];
-    if (app?.id) return { id: app.id, name: app.name ?? "Unknown" };
-    const id = config.applicationId ?? config.application_id;
-    return id ? { id, name: config.messages?.gameTitle ?? "Unknown" } : null;
+    if (app?.id) return { id: app.id, name: app.name ?? fallbackName };
+
+    // configVersion 2+ quests dropped the top-level `application` and bury the
+    // id somewhere deeper (ctaConfig, taskConfigV2, …). Scan for an
+    // application-ish key instead of hardcoding a path Discord will move again.
+    const scan = (node, depth) => {
+      if (!node || typeof node !== "object" || depth > 5) return null;
+      for (const [key, value] of Object.entries(node)) {
+        if (/^application(_?id)?$/i.test(key)) {
+          if (typeof value === "string" && /^\d{17,20}$/.test(value)) return { id: value, name: fallbackName };
+          if (value?.id) return { id: value.id, name: value.name ?? fallbackName };
+        }
+        const nested = scan(value, depth + 1);
+        if (nested) return nested;
+      }
+      return null;
+    };
+    return scan(config, 0);
   };
 
   const getTaskConfig = quest => quest?.config?.taskConfig ?? quest?.config?.taskConfigV2 ?? null;
