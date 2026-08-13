@@ -46,34 +46,30 @@
 
   const isApp = typeof DiscordNative !== "undefined";
 
-  // Discord has moved the quest's application object around across config
-  // versions: older quests expose `config.application`, newer ones ship an
-  // `applications` array, and some carry only a bare id. Normalise all of them.
-  const resolveApp = config => {
+  // taskConfigV2 moved the application off the quest config and onto each task,
+  // so the id has to be read per-task: an app id borrowed from elsewhere builds
+  // a fake process Discord can't match to the quest, and no heartbeat ever
+  // arrives (silent hang). `config.application` is the legacy v1 fallback.
+  const resolveApp = (config, taskConfig, taskName) => {
+    const app = taskConfig?.tasks?.[taskName]?.applications?.[0]
+      ?? config.application
+      ?? config.applications?.[0];
+    if (!app?.id) return null;
     const fallbackName = config.messages?.gameTitle ?? config.messages?.questName ?? "Unknown";
-    const app = config.application ?? config.applications?.[0];
-    if (app?.id) return { id: app.id, name: app.name ?? fallbackName };
-
-    // configVersion 2+ quests dropped the top-level `application` and bury the
-    // id somewhere deeper (ctaConfig, taskConfigV2, …). Scan for an
-    // application-ish key instead of hardcoding a path Discord will move again.
-    const scan = (node, depth) => {
-      if (!node || typeof node !== "object" || depth > 5) return null;
-      for (const [key, value] of Object.entries(node)) {
-        if (/^application(_?id)?$/i.test(key)) {
-          if (typeof value === "string" && /^\d{17,20}$/.test(value)) return { id: value, name: fallbackName };
-          if (value?.id) return { id: value.id, name: value.name ?? fallbackName };
-        }
-        const nested = scan(value, depth + 1);
-        if (nested) return nested;
-      }
-      return null;
-    };
-    return scan(config, 0);
+    return { id: app.id, name: app.name ?? fallbackName };
   };
 
   const getTaskConfig = quest => quest?.config?.taskConfig ?? quest?.config?.taskConfigV2 ?? null;
   const getTasks = quest => getTaskConfig(quest)?.tasks ?? {};
+
+  // userStatus.progress is a plain object over REST, but dispatched payloads go
+  // through the client's own transform first, so a Map is possible — indexing
+  // one with [] reads undefined and looks exactly like "no progress".
+  const readProgress = (userStatus, key) => {
+    const p = userStatus?.progress;
+    const entry = p instanceof Map ? p.get(key) : p?.[key];
+    return entry?.value ?? userStatus?.streamProgressSeconds ?? 0;
+  };
 
   const buildFakeGame = (appData, applicationId, pid) => {
     const name = appData.name;
@@ -107,16 +103,17 @@
     if (!quest) { console.log("🏁 All done — claim your rewards under the Quests tab!"); return; }
 
     const pid = Math.floor(Math.random() * 30000) + 1000;
-    // Only the game/stream tasks actually need an application — resolve it
-    // lazily so a video/activity quest never dies on a missing app object.
-    const app = resolveApp(quest.config);
-    const applicationId = app?.id;
-    const applicationName = app?.name ?? "Unknown";
     const questName = quest.config.messages?.questName ?? quest.id;
     const taskConfig = getTaskConfig(quest);
     const taskName = supportedTasks.find(x => taskConfig.tasks[x] != null);
     const secondsNeeded = taskConfig.tasks[taskName].target;
-    let secondsDone = quest.userStatus?.progress?.[taskName]?.value ?? 0;
+    let secondsDone = readProgress(quest.userStatus, taskName);
+
+    // Resolved after taskName, and only the game/stream branches consume it, so
+    // a video/activity quest never dies on a missing application object.
+    const app = resolveApp(quest.config, taskConfig, taskName);
+    const applicationId = app?.id;
+    const applicationName = app?.name ?? "Unknown";
 
     if (taskName === "WATCH_VIDEO" || taskName === "WATCH_VIDEO_ON_MOBILE") {
       const maxFuture = 10, speed = 7, interval = 1;
@@ -160,9 +157,7 @@
         FluxDispatcher.dispatch({ type: "RUNNING_GAMES_CHANGE", removed: realGames, added: [fakeGame], games: fakeGames });
 
         const fn = data => {
-          const progress = quest.config.configVersion === 1
-            ? data.userStatus.streamProgressSeconds
-            : Math.floor(data.userStatus.progress.PLAY_ON_DESKTOP.value);
+          const progress = Math.floor(readProgress(data.userStatus, "PLAY_ON_DESKTOP"));
           console.log(`📊 Game progress: ${progress}/${secondsNeeded}s`);
           if (progress >= secondsNeeded) {
             console.log(`✅ Quest completed: ${questName}`);
@@ -188,9 +183,7 @@
       const realFunc = ApplicationStreamingStore.getStreamerActiveStreamMetadata;
       ApplicationStreamingStore.getStreamerActiveStreamMetadata = () => ({ id: applicationId, pid, sourceName: null });
       const fn = data => {
-        const progress = quest.config.configVersion === 1
-          ? data.userStatus.streamProgressSeconds
-          : Math.floor(data.userStatus.progress.STREAM_ON_DESKTOP.value);
+        const progress = Math.floor(readProgress(data.userStatus, "STREAM_ON_DESKTOP"));
         console.log(`📊 Stream progress: ${progress}/${secondsNeeded}s`);
         if (progress >= secondsNeeded) {
           console.log(`✅ Quest completed: ${questName}`);
@@ -212,7 +205,7 @@
         console.log(`🕹️ Completing activity: ${questName}`);
         while (true) {
           const res = await api.post({ url: `/quests/${quest.id}/heartbeat`, body: { stream_key: streamKey, terminal: false } });
-          const progress = res.body.progress.PLAY_ACTIVITY.value;
+          const progress = readProgress(res.body, "PLAY_ACTIVITY");
           console.log(`📊 Activity progress: ${progress}/${secondsNeeded}s`);
           await new Promise(r => setTimeout(r, 20 * 1000));
           if (progress >= secondsNeeded) {

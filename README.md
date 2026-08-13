@@ -81,11 +81,17 @@ Discord changed its internal code and the script's module lookups are out of dat
 Grab the latest version of this repo, or wait for an update.
 
 ### `Cannot read properties of undefined (reading 'id')`
-Old versions read the quest's application object unconditionally as `quest.config.application`.
-Newer quest payloads may ship it as an `applications` array, as a bare id, or not at all — which
-crashed even video/activity quests that don't need an application. Fixed: the app is now resolved
-through several fallbacks, and quests genuinely missing one are skipped with a message instead of
-throwing. Re-copy the script from this repo.
+Old versions read the quest's application unconditionally as `quest.config.application`, before
+even branching on the task type — so any `taskConfigV2` quest threw, including video/activity
+quests that never use an application id. `taskConfigV2` moved the application onto each task, at
+`taskConfigV2.tasks[TASK_NAME].applications[0].id`; that's where it's read from now, with
+`config.application` kept as the legacy fallback. Re-copy the script from this repo.
+
+Credit: the per-task location was confirmed against
+[nyxxbit/discord-quest-completer](https://github.com/nyxxbit/discord-quest-completer)
+(`tasks.ts` → `appIdFor`), which also documents why the id must be task-scoped — a mismatched
+application id builds a fake process Discord can't tie to the quest, so no heartbeat ever arrives
+and the quest hangs at 0 with no error.
 
 ### `Action Limited` / HTTP 429 error
 Discord caps quest rewards per day/week. If you run several quests back-to-back you may get
