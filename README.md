@@ -80,6 +80,13 @@ for video/activity quests.
 Discord changed its internal code and the script's module lookups are out of date.
 Grab the latest version of this repo, or wait for an update.
 
+### `Cannot read properties of undefined (reading 'id')`
+Old versions read the quest's application object unconditionally as `quest.config.application`.
+Newer quest payloads may ship it as an `applications` array, as a bare id, or not at all — which
+crashed even video/activity quests that don't need an application. Fixed: the app is now resolved
+through several fallbacks, and quests genuinely missing one are skipped with a message instead of
+throwing. Re-copy the script from this repo.
+
 ### `Action Limited` / HTTP 429 error
 Discord caps quest rewards per day/week. If you run several quests back-to-back you may get
 soft-locked. Fully quit Discord, disable rich-presence integrations (Spotify, etc.), wait a few

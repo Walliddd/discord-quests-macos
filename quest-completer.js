@@ -73,6 +73,19 @@
   // ---------------------------------------------------------------------------
   // 3. Build a platform-correct fake "running game" object
   // ---------------------------------------------------------------------------
+  // Discord has moved the quest's application object around across config
+  // versions: older quests expose `config.application`, newer ones ship an
+  // `applications` array, and some carry only a bare id. Normalise all of them.
+  const resolveApp = config => {
+    const app = config.application ?? config.applications?.[0];
+    if (app?.id) return { id: app.id, name: app.name ?? "Unknown" };
+    const id = config.applicationId ?? config.application_id;
+    return id ? { id, name: config.messages?.gameTitle ?? "Unknown" } : null;
+  };
+
+  const getTaskConfig = quest => quest?.config?.taskConfig ?? quest?.config?.taskConfigV2 ?? null;
+  const getTasks = quest => getTaskConfig(quest)?.tasks ?? {};
+
   const buildFakeGame = (appData, applicationId, pid) => {
     const name = appData.name;
     const exe = appData.executables?.find(x => x.os === OS)?.name?.replace(/^>/, "");
@@ -113,7 +126,7 @@
     x.userStatus?.enrolledAt &&
     !x.userStatus?.completedAt &&
     new Date(x.config.expiresAt).getTime() > Date.now() &&
-    supportedTasks.some(y => Object.keys((x.config.taskConfig ?? x.config.taskConfigV2).tasks).includes(y))
+    supportedTasks.some(y => getTasks(x)[y] != null)
   );
 
   if (quests.length === 0) {
@@ -133,10 +146,13 @@
     }
 
     const pid = Math.floor(Math.random() * 30000) + 1000;
-    const applicationId = quest.config.application.id;
-    const applicationName = quest.config.application.name;
-    const questName = quest.config.messages.questName;
-    const taskConfig = quest.config.taskConfig ?? quest.config.taskConfigV2;
+    // Only the game/stream tasks actually need an application — resolve it
+    // lazily so a video/activity quest never dies on a missing app object.
+    const app = resolveApp(quest.config);
+    const applicationId = app?.id;
+    const applicationName = app?.name ?? "Unknown";
+    const questName = quest.config.messages?.questName ?? quest.id;
+    const taskConfig = getTaskConfig(quest);
     const taskName = supportedTasks.find(x => taskConfig.tasks[x] != null);
     const secondsNeeded = taskConfig.tasks[taskName].target;
     let secondsDone = quest.userStatus?.progress?.[taskName]?.value ?? 0;
@@ -174,8 +190,14 @@
         doJob();
         return;
       }
+      if (!applicationId) {
+        console.log("⚠️ No application in this quest's config — skipping:", questName);
+        console.log("   config keys were:", Object.keys(quest.config).join(", "));
+        doJob();
+        return;
+      }
       api.get({ url: `/applications/public?application_ids=${applicationId}` }).then(res => {
-        const appData = res.body[0];
+        const appData = res.body?.[0] ?? { name: applicationName };
         const fakeGame = buildFakeGame(appData, applicationId, pid);
 
         const realGames = RunningGameStore.getRunningGames();
@@ -208,6 +230,12 @@
     } else if (taskName === "STREAM_ON_DESKTOP") {
       if (!isApp) {
         console.log("⚠️ Stream quests can't run in the browser. Open the Discord desktop app to complete:", questName);
+        doJob();
+        return;
+      }
+      if (!applicationId) {
+        console.log("⚠️ No application in this quest's config — skipping:", questName);
+        console.log("   config keys were:", Object.keys(quest.config).join(", "));
         doJob();
         return;
       }
